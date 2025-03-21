@@ -1,0 +1,8 @@
+/* Import TailwindCSS styles if using Tailwind */
+@import "./tailwind.css";
+
+/* Custom global CSS overrides */
+body {
+  margin: 0;
+  font-family: sans-serif;
+}
