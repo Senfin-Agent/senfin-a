@@ -1,7 +1,106 @@
+const crypto = require('crypto');
 const recallService = require('./recallService');
 const nillionSecretLLMService = require('./nillionSecretLLMService');
 const fs = require('fs');
 const path = require('path');
+
+/**
+ * Encrypt data with a user-specific encryption key
+ * @param {Object|string} data - Data to encrypt
+ * @param {string} userKey - User's encryption key
+ * @returns {Object} Encrypted data object
+ */
+function encryptData(data, userKey) {
+  // Convert data to string if it's an object
+  const dataString = typeof data === 'object' ? JSON.stringify(data) : data;
+  
+  // Generate a random initialization vector
+  const iv = crypto.randomBytes(16);
+  
+  // Create cipher using AES-256-CBC with the user's key
+  const key = crypto.createHash('sha256').update(userKey).digest();
+  const cipher = crypto.createCipheriv('aes-256-cbc', key, iv);
+  
+  // Encrypt the data
+  let encrypted = cipher.update(dataString, 'utf8', 'hex');
+  encrypted += cipher.final('hex');
+  
+  return {
+    encrypted,
+    iv: iv.toString('hex')
+  };
+}
+
+/**
+ * Decrypt data with a user-specific encryption key
+ * @param {Object} encryptedData - Object containing encrypted data and IV
+ * @param {string} userKey - User's encryption key
+ * @returns {Object|string} Decrypted data
+ */
+function decryptData(encryptedData, userKey) {
+  try {
+    const { encrypted, iv } = encryptedData;
+    
+    // Create decipher
+    const key = crypto.createHash('sha256').update(userKey).digest();
+    const decipher = crypto.createDecipheriv('aes-256-cbc', key, Buffer.from(iv, 'hex'));
+    
+    // Decrypt the data
+    let decrypted = decipher.update(encrypted, 'hex', 'utf8');
+    decrypted += decipher.final('utf8');
+    
+    // Try to parse as JSON, return as string if not valid JSON
+    try {
+      return JSON.parse(decrypted);
+    } catch (e) {
+      return decrypted;
+    }
+  } catch (error) {
+    console.error('Error decrypting data:', error);
+    throw new Error('Decryption failed. Invalid key or corrupted data.');
+  }
+}
+
+/**
+ * Access control system for token-gated data
+ * Simple implementation for MVP
+ */
+const accessControl = {
+  // Storage for access rights
+  accessRights: {},
+  
+  // Grant access to a user for a specific dataset
+  grantAccess: function(datasetTimestamp, userAddress) {
+    if (!this.accessRights[datasetTimestamp]) {
+      this.accessRights[datasetTimestamp] = [];
+    }
+    
+    if (!this.accessRights[datasetTimestamp].includes(userAddress)) {
+      this.accessRights[datasetTimestamp].push(userAddress);
+    }
+    
+    return true;
+  },
+  
+  // Check if a user has access to a dataset
+  hasAccess: function(datasetTimestamp, userAddress) {
+    if (!this.accessRights[datasetTimestamp]) return false;
+    return this.accessRights[datasetTimestamp].includes(userAddress);
+  },
+  
+  // Get all datasets a user has access to
+  getUserAccessibleDatasets: function(userAddress) {
+    const accessibleDatasets = [];
+    
+    for (const [timestamp, users] of Object.entries(this.accessRights)) {
+      if (users.includes(userAddress)) {
+        accessibleDatasets.push(timestamp);
+      }
+    }
+    
+    return accessibleDatasets;
+  }
+};
 
 /**
  * Agent Index Bucket address from environment - will be used for all storage
@@ -14,16 +113,16 @@ let AGENT_INDEX_BUCKET = process.env.AGENT_INDEX_BUCKET;
  *
  * @param {Object} datasetSpec - Info needed to generate the synthetic data
  * @param {Object} sampleData - Optional sample data to base synthetic data on
+ * @param {string} userKey - User's encryption key for encrypting sensitive data and logs
  * @returns {Promise<Object>} - References to the object key, etc.
  */
-async function generateSynthetics(datasetSpec, sampleData = null) {
+async function generateSynthetics(datasetSpec, sampleData = null, userKey) {
   console.log('[syntheticDataService] Generating synthetic data for:', datasetSpec);
   
   // Ensure we have an agent index bucket
   if (!AGENT_INDEX_BUCKET) {
     console.log('[syntheticDataService] No AGENT_INDEX_BUCKET set; attempting to create or find one.');
     try {
-      // Try to create or find the agent index bucket
       AGENT_INDEX_BUCKET = await ensureAgentIndexBucket();
       if (!AGENT_INDEX_BUCKET) {
         throw new Error('Could not create or find agent index bucket. Cannot proceed with data generation.');
@@ -116,7 +215,6 @@ Return a valid JSON object with:
 }
 The response must ONLY be the JSON object, with no code blocks or other text.`;
 
-
   const messages = [
     {
       role: 'system',
@@ -139,9 +237,14 @@ The response must ONLY be the JSON object, with no code blocks or other text.`;
   const syntheticDataText = llmResponse?.choices?.[0]?.message?.content || '';
   console.log('[syntheticDataService] LLM response length:', syntheticDataText.length);
 
-  // Store chain-of-thought log with the same timestamp
-  const chainOfThought = `Raw LLM text:\n${syntheticDataText.slice(0, 2000)}...`; // truncated if large
-  const logResult = await storeChainOfThoughtLog(chainOfThought, timestamp);
+  // Store chain-of-thought log with the same timestamp (encrypt it if userKey is provided)
+  const chainOfThought = `Raw LLM text:\n${syntheticDataText.slice(0, 2000)}...`;
+  let logContent = chainOfThought;
+  if (userKey) {
+    const encryptedLog = encryptData(chainOfThought, userKey);
+    logContent = JSON.stringify(encryptedLog);
+  }
+  const logResult = await storeChainOfThoughtLog(logContent, timestamp);
 
   // Attempt to parse the LLM's JSON into an object
   const syntheticData = parseSyntheticData(syntheticDataText);
@@ -149,7 +252,7 @@ The response must ONLY be the JSON object, with no code blocks or other text.`;
   validateSyntheticDataPrivacy(syntheticData);
   
   // Add metadata to the synthetic data object including relationship to logs
-  const syntheticDataWithMetadata = {
+  let syntheticDataWithMetadata = {
     ...syntheticData,
     type: 'synthetic-dataset',
     datasetSpec: datasetSpec,
@@ -157,6 +260,12 @@ The response must ONLY be the JSON object, with no code blocks or other text.`;
     generationTimestamp: timestamp,
     relatedLogs: logKey
   };
+
+  // Encrypt the sensitive parts if userKey is provided
+  if (userKey) {
+    const encryptedData = encryptData(syntheticData, userKey);
+    syntheticDataWithMetadata.encryptedData = encryptedData;
+  }
 
   // Save the synthetic data to the agent index bucket
   try {
@@ -175,7 +284,7 @@ The response must ONLY be the JSON object, with no code blocks or other text.`;
 
     return {
       success: true,
-      syntheticData,
+      syntheticData, // Return the unencrypted version to the caller
       recallBucket: AGENT_INDEX_BUCKET,
       objectKey: syntheticDataKey,
       transactionHash: txHash,
@@ -197,7 +306,6 @@ async function getSyntheticBuckets() {
   if (!AGENT_INDEX_BUCKET) {
     console.log('[syntheticDataService] No AGENT_INDEX_BUCKET set; attempting to create or find one.');
     try {
-      // Try to create or find the agent index bucket
       AGENT_INDEX_BUCKET = await ensureAgentIndexBucket();
       if (!AGENT_INDEX_BUCKET) {
         console.warn('[syntheticDataService] Could not create or find agent index bucket. Cannot track synthetic buckets.');
@@ -246,7 +354,7 @@ async function getSyntheticBuckets() {
 }
 
 /**
- * Attempt to parse the LLM's raw response into a JSON object with "data".
+ * Attempt to parse the LLM's raw response into a JSON object.
  */
 function parseSyntheticData(syntheticDataText) {
   // Try the simplest approach first
@@ -300,7 +408,6 @@ async function getSyntheticDataObject(key) {
   if (!AGENT_INDEX_BUCKET) {
     console.log('[syntheticDataService] No AGENT_INDEX_BUCKET set; attempting to create or find one.');
     try {
-      // Try to create or find the agent index bucket
       AGENT_INDEX_BUCKET = await ensureAgentIndexBucket();
       if (!AGENT_INDEX_BUCKET) {
         throw new Error('Could not create or find agent index bucket. Cannot fetch synthetic data object.');
@@ -326,7 +433,6 @@ async function getRelatedChainOfThoughtLog(timestamp) {
   if (!AGENT_INDEX_BUCKET) {
     console.log('[syntheticDataService] No AGENT_INDEX_BUCKET set; attempting to create or find one.');
     try {
-      // Try to create or find the agent index bucket
       AGENT_INDEX_BUCKET = await ensureAgentIndexBucket();
       if (!AGENT_INDEX_BUCKET) {
         throw new Error('Could not create or find agent index bucket. Cannot fetch chain-of-thought logs.');
@@ -369,7 +475,6 @@ async function storeChainOfThoughtLog(logContent, timestamp) {
   if (!AGENT_INDEX_BUCKET) {
     console.log('[syntheticDataService] No AGENT_INDEX_BUCKET set; attempting to create or find one.');
     try {
-      // Try to create or find the agent index bucket
       AGENT_INDEX_BUCKET = await ensureAgentIndexBucket();
       if (!AGENT_INDEX_BUCKET) {
         throw new Error('Could not create or find agent index bucket. Cannot store chain-of-thought logs.');
@@ -416,7 +521,6 @@ async function getSyntheticDataAndLogs(timestamp) {
   if (!AGENT_INDEX_BUCKET) {
     console.log('[syntheticDataService] No AGENT_INDEX_BUCKET set; attempting to create or find one.');
     try {
-      // Try to create or find the agent index bucket
       AGENT_INDEX_BUCKET = await ensureAgentIndexBucket();
       if (!AGENT_INDEX_BUCKET) {
         throw new Error('Could not create or find agent index bucket. Cannot fetch synthetic data and logs.');
@@ -460,7 +564,6 @@ async function verifyAgentIndexBucket() {
   if (!AGENT_INDEX_BUCKET) {
     console.log('[syntheticDataService] No AGENT_INDEX_BUCKET set; attempting to create or find one.');
     try {
-      // Try to create or find the agent index bucket
       AGENT_INDEX_BUCKET = await ensureAgentIndexBucket();
       if (!AGENT_INDEX_BUCKET) {
         return false;
@@ -573,5 +676,8 @@ module.exports = {
   verifyAgentIndexBucket,
   getRelatedChainOfThoughtLog,
   getSyntheticDataAndLogs,
-  ensureAgentIndexBucket
+  ensureAgentIndexBucket,
+  encryptData,
+  decryptData,
+  accessControl
 };

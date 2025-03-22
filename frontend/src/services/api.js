@@ -83,3 +83,65 @@ export async function listAgentObjects(prefix = '') {
     const encodedKey = encodeURIComponent(key);
     return axios.get(`/agent/object/${encodedKey}`);
   }
+
+  /**
+ * Check if user has access to a dataset
+ * @param {string} datasetTimestamp - The timestamp of the dataset
+ * @param {string} userAddress - The user's wallet address
+ * @returns {Promise<Object>} The API response
+ */
+export async function checkAccess(datasetTimestamp, userAddress) {
+    try {
+      const response = await fetch(`/access/check?datasetTimestamp=${datasetTimestamp}&userAddress=${userAddress}`);
+      const data = await response.json();
+      return data;
+    } catch (error) {
+      console.error('API error checking access:', error);
+      throw error;
+    }
+  }
+  
+  /**
+   * Purchase access to a dataset
+   * @param {string} datasetTimestamp - The timestamp of the dataset
+   * @param {string} userAddress - The user's wallet address
+   * @param {Object} paymentProof - Proof of payment (mock for MVP)
+   * @returns {Promise<Object>} The API response
+   */
+  export async function purchaseAccess(datasetTimestamp, userAddress, paymentProof) {
+    try {
+      const response = await fetch('/access/purchase', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          datasetTimestamp,
+          userAddress,
+          paymentProof
+        }),
+      });
+      
+      const data = await response.json();
+      return data;
+    } catch (error) {
+      console.error('API error purchasing access:', error);
+      throw error;
+    }
+  }
+  
+  /**
+   * Get all datasets accessible to a user
+   * @param {string} userAddress - The user's wallet address
+   * @returns {Promise<Object>} The API response
+   */
+  export async function getUserAccessibleDatasets(userAddress) {
+    try {
+      const response = await fetch(`/access/user-datasets?userAddress=${userAddress}`);
+      const data = await response.json();
+      return data;
+    } catch (error) {
+      console.error('API error getting user datasets:', error);
+      throw error;
+    }
+  }
