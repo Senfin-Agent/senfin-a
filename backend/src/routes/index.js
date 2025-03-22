@@ -13,6 +13,10 @@ router.use('/synthesis', synthesisRoutes);
 const recallRoutes = require('./recallRoutes');
 router.use('/recall', recallRoutes);
 
+const agentRoutes = require('./agentRoutes');
+router.use('/agent', agentRoutes); // make sure this is mounted
+
+
 
 // Health check endpoint
 router.get('/health', (req, res) => {

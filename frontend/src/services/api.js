@@ -62,3 +62,24 @@ export async function queryRecallBucket(bucket, prefix = '') {
     // Adjust to match your backend route
     return axios.post('/recall/queryBucket', { bucket, prefix });
 }
+
+/**
+ * List objects from agent index bucket, optionally with prefix
+ * GET /agent/objects?prefix=...
+ */
+export async function listAgentObjects(prefix = '') {
+    const res = await axios.get('/agent/objects', {
+      params: { prefix }
+    });
+    return res;
+  }
+  
+  /**
+   * Fetch a single object by key from the agent index bucket
+   * GET /agent/object/:key
+   */
+  export async function fetchAgentObject(key) {
+    // Notice we pass the entire "synthetic-data/1234.json" etc.
+    const encodedKey = encodeURIComponent(key);
+    return axios.get(`/agent/object/${encodedKey}`);
+  }

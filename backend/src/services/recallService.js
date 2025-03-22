@@ -77,11 +77,24 @@ async function createBucketAndAddObject(dataObject) {
  * @param {string} prefix - Optional prefix for the key (e.g., "cot", "synthetics")
  * @returns {Promise<{bucket: string, key: string, txHash: string}>}
  */
-async function addObjectToExistingBucket(bucketAddress, dataObject, prefix = 'logs') {
+async function addObjectToExistingBucket(bucket, dataObject, prefix = 'synthetics') {
   const recall = await createRecallClient();
   await ensureCreditBalanceIfZero(recall);
 
-  return addObjectToBucketInternal(recall, bucketAddress, dataObject, prefix);
+  const bucketManager = recall.bucketManager();
+
+  // Convert data to JSON
+  const contentString = JSON.stringify(dataObject, null, 2);
+  const fileBuffer = Buffer.from(contentString, 'utf8');
+
+  const timestamp = Date.now();
+  const key = `${prefix}/${dataObject.id || timestamp}.json`;
+
+  const { meta } = await bucketManager.add(bucket, key, fileBuffer);
+  const txHash = meta?.tx?.transactionHash;
+
+  console.log(`[recallService] Object added to existing bucket:`, { bucket, key, txHash });
+  return { bucket, key, txHash };
 }
 
 /**
@@ -152,35 +165,41 @@ async function getObject(bucket, key) {
   }
 }
 
-/**
- * Query a bucket for objects by prefix, returning a list of { key, value: { hash, size, metadata } }
- *
- * @param {string} bucket - The address of the bucket
- * @param {string} prefix - optional prefix to filter objects, e.g. 'synthetics/'
- */
-async function queryBucket(bucket, prefix = '') {
-  const recall = await createRecallClient();
-  const bucketManager = recall.bucketManager();
+// /**
+//  * Query a bucket for objects by prefix, returning a list of { key, value: { hash, size, metadata } }
+//  *
+//  * @param {string} bucket - The address of the bucket
+//  * @param {string} prefix - optional prefix to filter objects, e.g. 'synthetics/'
+//  */
+// async function queryBucket(bucket, prefix = '') {
+//   const recall = await createRecallClient();
+//   const bucketManager = recall.bucketManager();
 
-  const { result } = await bucketManager.query(bucket, { prefix });
-  return result.objects || [];
-}
+//   // Pass delimiter as empty string to disable hierarchical grouping.
+//   const { result } = await bucketManager.query(bucket, { prefix, delimiter: '' });
+
+//   console.log(result);
+//   return result.objects || [];
+// }
 
 /**
- * Query a bucket for objects by prefix, returning a list of { key, value: { hash, size, metadata } }
+ * Recursively query a bucket for objects by prefix, returning a flat list of
+ * { key, value: { hash, size, metadata } }.
  *
- * @param {string} bucket - The address of the bucket
- * @param {string} prefix - optional prefix to filter objects, e.g. 'synthetics/'
+ * @param {string} bucket - The address of the bucket.
+ * @param {string} prefix - Optional prefix to filter objects, e.g. 'synthetics/'.
+ * @returns {Array} Flat list of objects.
  */
 async function queryBucket(bucket, prefix = '') {
   try {
     const recall = await createRecallClient();
     const bucketManager = recall.bucketManager();
 
-    const { result } = await bucketManager.query(bucket, { prefix });
+    // Use delimiter to get a hierarchical view.
+    const { result } = await bucketManager.query(bucket, { prefix, delimiter: '/' });
 
-    // Ensure each object has the expected structure with safe access
-    const objects = (result.objects || []).map(obj => ({
+    // Process objects at the current level.
+    let objects = (result.objects || []).map(obj => ({
       key: obj.key || 'unknown',
       value: {
         hash: obj.value?.hash || 'unknown',
@@ -189,11 +208,19 @@ async function queryBucket(bucket, prefix = '') {
       }
     }));
 
-    // Convert any BigInt values to strings
+    // Recursively query each common prefix (i.e. "folder").
+    if (result.commonPrefixes && result.commonPrefixes.length > 0) {
+      for (const cp of result.commonPrefixes) {
+        const nestedObjects = await queryBucket(bucket, cp);
+        objects = objects.concat(nestedObjects);
+      }
+    }
+
+    // Convert any BigInt values to strings (if needed)
     return objects.map(obj => makeSerializable(obj));
   } catch (error) {
     console.error(`[RecallService] Error querying bucket ${bucket}:`, error);
-    return []; // Return empty array on error
+    return []; // Return empty array on error.
   }
 }
 

@@ -12,14 +12,15 @@ function Navbar() {
           <Link to="/" className="hover:underline">
             Home
           </Link>
-          {/* Changed from "/verify" to "/synthesize" */}
           <Link to="/synthesize" className="hover:underline">
             Synthesize
           </Link>
           <Link to="/wallet" className="hover:underline">
             Wallet
           </Link>
-          <Link to="/recall" className="hover:underline">Recall</Link> {/* new */}
+          <Link to="/recall" className="hover:underline">Recall</Link> 
+          <Link to="/agentindex" className="hover:underline">Agent Index</Link>
+
 
         </div>
       </div>

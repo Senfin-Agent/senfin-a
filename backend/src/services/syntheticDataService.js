@@ -1,16 +1,43 @@
 const recallService = require('./recallService');
 const nillionSecretLLMService = require('./nillionSecretLLMService');
+const fs = require('fs');
+const path = require('path');
 
 /**
- * Generate a synthetic dataset using the TEE-based LLM service, then store it in Recall.
- * Also store optional chain-of-thought or reasoning logs to a separate logs bucket.
+ * Agent Index Bucket address from environment - will be used for all storage
+ */
+let AGENT_INDEX_BUCKET = process.env.AGENT_INDEX_BUCKET;
+
+/**
+ * Generate a synthetic dataset using the TEE-based LLM service, then store it in the Agent Index Bucket.
+ * Also store optional chain-of-thought or reasoning logs to the same agent index bucket with matching timestamp.
  *
  * @param {Object} datasetSpec - Info needed to generate the synthetic data
  * @param {Object} sampleData - Optional sample data to base synthetic data on
- * @returns {Promise<Object>} - References to the newly created bucket, object key, etc.
+ * @returns {Promise<Object>} - References to the object key, etc.
  */
 async function generateSynthetics(datasetSpec, sampleData = null) {
   console.log('[syntheticDataService] Generating synthetic data for:', datasetSpec);
+  
+  // Ensure we have an agent index bucket
+  if (!AGENT_INDEX_BUCKET) {
+    console.log('[syntheticDataService] No AGENT_INDEX_BUCKET set; attempting to create or find one.');
+    try {
+      // Try to create or find the agent index bucket
+      AGENT_INDEX_BUCKET = await ensureAgentIndexBucket();
+      if (!AGENT_INDEX_BUCKET) {
+        throw new Error('Could not create or find agent index bucket. Cannot proceed with data generation.');
+      }
+    } catch (error) {
+      console.error('[syntheticDataService] Error ensuring agent index bucket:', error);
+      throw error;
+    }
+  }
+
+  // Generate timestamp for both synthetic data and logs to create relationship
+  const timestamp = Date.now();
+  const syntheticDataKey = `synthetic-data/${timestamp}.json`;
+  const logKey = `logs/cot/${timestamp}.txt`;
 
   // Analyze the sample data if provided
   let dataStructure = '';
@@ -112,28 +139,110 @@ The response must ONLY be the JSON object, with no code blocks or other text.`;
   const syntheticDataText = llmResponse?.choices?.[0]?.message?.content || '';
   console.log('[syntheticDataService] LLM response length:', syntheticDataText.length);
 
-  // OPTIONAL: Store chain-of-thought or reasoning logs
-  // If you want to store the entire LLM response or partial reasoning, do:
+  // Store chain-of-thought log with the same timestamp
   const chainOfThought = `Raw LLM text:\n${syntheticDataText.slice(0, 2000)}...`; // truncated if large
-  await storeChainOfThoughtLog(chainOfThought, 'cot/');
-  // ^ See function below. This writes to a "logs" bucket if you have one.
+  const logResult = await storeChainOfThoughtLog(chainOfThought, timestamp);
 
   // Attempt to parse the LLM's JSON into an object
   const syntheticData = parseSyntheticData(syntheticDataText);
 
-  // Validate privacy. (You might add more robust checks here.)
   validateSyntheticDataPrivacy(syntheticData);
-
-  // Save the final synthetic data object to Recall
-  const { bucket, key, txHash } = await recallService.createBucketAndAddObject(syntheticData);
-
-  return {
-    success: true,
-    syntheticData,
-    recallBucket: bucket,
-    objectKey: key,
-    transactionHash: txHash,
+  
+  // Add metadata to the synthetic data object including relationship to logs
+  const syntheticDataWithMetadata = {
+    ...syntheticData,
+    type: 'synthetic-dataset',
+    datasetSpec: datasetSpec,
+    createdAt: new Date().toISOString(),
+    generationTimestamp: timestamp,
+    relatedLogs: logKey
   };
+
+  // Save the synthetic data to the agent index bucket
+  try {
+    const { txHash } = await recallService.addObjectToExistingBucket(
+      AGENT_INDEX_BUCKET,
+      syntheticDataWithMetadata,
+      syntheticDataKey
+    );
+    
+    console.log('[syntheticDataService] Stored synthetic data in agent index bucket:', {
+      bucket: AGENT_INDEX_BUCKET,
+      key: syntheticDataKey,
+      txHash,
+      relatedLogs: logKey
+    });
+
+    return {
+      success: true,
+      syntheticData,
+      recallBucket: AGENT_INDEX_BUCKET,
+      objectKey: syntheticDataKey,
+      transactionHash: txHash,
+      timestamp,
+      relatedLogs: logKey
+    };
+  } catch (error) {
+    console.error('[syntheticDataService] Error storing synthetic data:', error);
+    throw error;
+  }
+}
+
+/**
+ * Get all synthetic data objects from the agent index bucket
+ * @returns {Promise<Array>} Array of synthetic data objects
+ */
+async function getSyntheticBuckets() {
+  // Ensure we have an agent index bucket
+  if (!AGENT_INDEX_BUCKET) {
+    console.log('[syntheticDataService] No AGENT_INDEX_BUCKET set; attempting to create or find one.');
+    try {
+      // Try to create or find the agent index bucket
+      AGENT_INDEX_BUCKET = await ensureAgentIndexBucket();
+      if (!AGENT_INDEX_BUCKET) {
+        console.warn('[syntheticDataService] Could not create or find agent index bucket. Cannot track synthetic buckets.');
+        return [];
+      }
+    } catch (error) {
+      console.error('[syntheticDataService] Error ensuring agent index bucket:', error);
+      return [];
+    }
+  }
+
+  try {
+    // Get all objects in the index bucket
+    const recall = await recallService.createRecallClient();
+    const bucketManager = recall.bucketManager();
+    
+    // List all objects in the bucket
+    const { result } = await bucketManager.list(AGENT_INDEX_BUCKET);
+    const keys = result?.keys || [];
+
+    // Filter keys to only include synthetic data
+    const syntheticDataKeys = keys.filter(key => key.startsWith('synthetic-data/'));
+
+    // Fetch each object to get the synthetic data
+    const syntheticDataObjects = [];
+    for (const key of syntheticDataKeys) {
+      try {
+        const data = await recallService.getObject(AGENT_INDEX_BUCKET, key);
+        if (data && data.type === 'synthetic-dataset') {
+          syntheticDataObjects.push({
+            ...data,
+            key,
+            bucketAddress: AGENT_INDEX_BUCKET
+          });
+        }
+      } catch (error) {
+        console.warn(`[syntheticDataService] Error fetching object ${key} from index:`, error.message);
+      }
+    }
+
+    return syntheticDataObjects;
+  } catch (error) {
+    console.error('[syntheticDataService] Error listing synthetic data objects:', error);
+    return [];
+  }
 }
 
 /**
@@ -184,120 +293,285 @@ function validateSyntheticDataPrivacy(syntheticData) {
 }
 
 /**
- * Fetch a synthetic data object from Recall.
+ * Fetch a synthetic data object from the agent index bucket.
  */
-async function getSyntheticDataObject(bucket, key) {
-  console.log('[syntheticDataService] Fetching synthetic data from:', bucket, key);
-  const data = await recallService.getObject(bucket, key);
+async function getSyntheticDataObject(key) {
+  // Ensure we have an agent index bucket
+  if (!AGENT_INDEX_BUCKET) {
+    console.log('[syntheticDataService] No AGENT_INDEX_BUCKET set; attempting to create or find one.');
+    try {
+      // Try to create or find the agent index bucket
+      AGENT_INDEX_BUCKET = await ensureAgentIndexBucket();
+      if (!AGENT_INDEX_BUCKET) {
+        throw new Error('Could not create or find agent index bucket. Cannot fetch synthetic data object.');
+      }
+    } catch (error) {
+      console.error('[syntheticDataService] Error ensuring agent index bucket:', error);
+      throw error;
+    }
+  }
+  
+  console.log('[syntheticDataService] Fetching synthetic data from key:', key);
+  const data = await recallService.getObject(AGENT_INDEX_BUCKET, key);
   return data;
 }
 
-
-const LOGS_BUCKET_ADDR = process.env.RECALL_LOGS_BUCKET;
-
-
 /**
- * Store chain-of-thought text in a dedicated logs bucket, if desired.
- * @param {string} logContent - The textual CoT logs or LLM reasoning to store
- * @param {string} prefix - e.g., "cot/"
+ * Get related chain-of-thought logs for a synthetic data object
+ * @param {string|number} timestamp - The timestamp used in both synthetic data and logs
+ * @returns {Promise<string>} The content of the related log
  */
-async function storeChainOfThoughtLog(logContent, prefix = 'cot/') {
-  if (!LOGS_BUCKET_ADDR) {
-    console.log('[syntheticDataService] No RECALL_LOGS_BUCKET set. Creating a logs bucket...');
-
+async function getRelatedChainOfThoughtLog(timestamp) {
+  // Ensure we have an agent index bucket
+  if (!AGENT_INDEX_BUCKET) {
+    console.log('[syntheticDataService] No AGENT_INDEX_BUCKET set; attempting to create or find one.');
     try {
-      // Create a new recall client
-      const recall = await recallService.createRecallClient();
-      await recallService.ensureCreditBalanceIfZero(recall);
-
-      const bucketManager = recall.bucketManager();
-
-      // Try to find existing bucket with alias "logs" by listing all buckets
-      const { result: bucketsResult } = await bucketManager.list();
-      const buckets = bucketsResult?.buckets || [];
-
-      let logsBucket = null;
-
-      // Check each bucket's metadata for the alias
-      for (const bucket of buckets) {
-        try {
-          const { result: metadataResult } = await bucketManager.getMetadata(bucket);
-          // Convert metadata result to a serializable format
-          const metadata = metadataResult?.metadata || {};
-
-          if (metadata.alias === 'logs') {
-            console.log(`[syntheticDataService] Found bucket with alias 'logs':`, bucket);
-            logsBucket = bucket;
-            break;
-          }
-        } catch (error) {
-          console.warn(`[syntheticDataService] Error fetching metadata for bucket ${bucket}:`, error.message);
-        }
+      // Try to create or find the agent index bucket
+      AGENT_INDEX_BUCKET = await ensureAgentIndexBucket();
+      if (!AGENT_INDEX_BUCKET) {
+        throw new Error('Could not create or find agent index bucket. Cannot fetch chain-of-thought logs.');
       }
-
-      // If no logs bucket found, create a new one
-      if (!logsBucket) {
-        console.log('[syntheticDataService] No logs bucket found, creating a new one...');
-        const { result: { bucket } } = await bucketManager.create({
-          metadata: { alias: 'logs' }
-        });
-        logsBucket = bucket;
-        console.log('[syntheticDataService] Created new logs bucket:', logsBucket);
-      }
-
-      // Convert log to buffer
-      const fileBuffer = Buffer.from(logContent, 'utf8');
-      const timestamp = Date.now();
-      const key = `${prefix}${timestamp}.txt`;
-
-      // Add the log content to the bucket
-      const { meta } = await bucketManager.add(logsBucket, key, fileBuffer);
-      // Convert BigInt values to strings for the transaction hash
-      const txHash = meta?.tx?.transactionHash ? meta.tx.transactionHash.toString() : null;
-
-      console.log('[syntheticDataService] Chain-of-thought logs stored in logs bucket:', {
-        logsBucket,
-        key,
-        txHash,
-      });
-
-      return { bucket: logsBucket, key, txHash };
     } catch (error) {
-      console.error('[syntheticDataService] Error storing chain-of-thought logs:', error);
-      return null;
+      console.error('[syntheticDataService] Error ensuring agent index bucket:', error);
+      throw error;
     }
-  } else {
-    // Use the provided bucket address
-    try {
-      const recall = await recallService.createRecallClient();
-      await recallService.ensureCreditBalanceIfZero(recall);
+  }
 
-      // Convert log to buffer
-      const fileBuffer = Buffer.from(logContent, 'utf8');
-      const timestamp = Date.now();
-      const key = `${prefix}${timestamp}.txt`;
-
-      const bucketManager = recall.bucketManager();
-      const { meta } = await bucketManager.add(LOGS_BUCKET_ADDR, key, fileBuffer);
-      // Convert BigInt values to strings for the transaction hash
-      const txHash = meta?.tx?.transactionHash ? meta.tx.transactionHash.toString() : null;
-
-      console.log('[syntheticDataService] Chain-of-thought logs stored in logs bucket:', {
-        logsBucket: LOGS_BUCKET_ADDR,
-        key,
-        txHash,
-      });
-
-      return { bucket: LOGS_BUCKET_ADDR, key, txHash };
-    } catch (error) {
-      console.error('[syntheticDataService] Error storing chain-of-thought logs:', error);
-      return null;
+  const logKey = `logs/cot/${timestamp}.txt`;
+  
+  try {
+    const recall = await recallService.createRecallClient();
+    const bucketManager = recall.bucketManager();
+    
+    // Get the log file as a buffer
+    const { result } = await bucketManager.get(AGENT_INDEX_BUCKET, logKey);
+    
+    // Convert buffer to string
+    if (result && result.object) {
+      return result.object.toString('utf8');
     }
+    
+    throw new Error(`Log not found: ${logKey}`);
+  } catch (error) {
+    console.error(`[syntheticDataService] Error fetching related log for timestamp ${timestamp}:`, error);
+    return null;
   }
 }
 
+/**
+ * Store chain-of-thought text in the agent index bucket with specific timestamp
+ * @param {string} logContent - The textual CoT logs or LLM reasoning to store
+ * @param {number} timestamp - Timestamp to use in the key (to match synthetic data)
+ * @returns {Promise<Object>} Object containing key and transaction info
+ */
+async function storeChainOfThoughtLog(logContent, timestamp) {
+  // Ensure we have an agent index bucket
+  if (!AGENT_INDEX_BUCKET) {
+    console.log('[syntheticDataService] No AGENT_INDEX_BUCKET set; attempting to create or find one.');
+    try {
+      // Try to create or find the agent index bucket
+      AGENT_INDEX_BUCKET = await ensureAgentIndexBucket();
+      if (!AGENT_INDEX_BUCKET) {
+        throw new Error('Could not create or find agent index bucket. Cannot store chain-of-thought logs.');
+      }
+    } catch (error) {
+      console.error('[syntheticDataService] Error ensuring agent index bucket:', error);
+      throw error;
+    }
+  }
+
+  try {
+    const recall = await recallService.createRecallClient();
+    await recallService.ensureCreditBalanceIfZero(recall);
+
+    // Convert log to buffer
+    const fileBuffer = Buffer.from(logContent, 'utf8');
+    const key = `logs/cot/${timestamp}.txt`;
+
+    const bucketManager = recall.bucketManager();
+    const { meta } = await bucketManager.add(AGENT_INDEX_BUCKET, key, fileBuffer);
+    // Convert BigInt values to strings for the transaction hash
+    const txHash = meta?.tx?.transactionHash ? meta.tx.transactionHash.toString() : null;
+
+    console.log('[syntheticDataService] Chain-of-thought logs stored in agent index bucket:', {
+      bucket: AGENT_INDEX_BUCKET,
+      key,
+      txHash,
+    });
+
+    return { bucket: AGENT_INDEX_BUCKET, key, txHash };
+  } catch (error) {
+    console.error('[syntheticDataService] Error storing chain-of-thought logs:', error);
+    return null;
+  }
+}
+
+/**
+ * Find and return both synthetic data and related logs by timestamp
+ * @param {string|number} timestamp - The timestamp to search for
+ * @returns {Promise<Object>} Object containing both synthetic data and logs
+ */
+async function getSyntheticDataAndLogs(timestamp) {
+  // Ensure we have an agent index bucket
+  if (!AGENT_INDEX_BUCKET) {
+    console.log('[syntheticDataService] No AGENT_INDEX_BUCKET set; attempting to create or find one.');
+    try {
+      // Try to create or find the agent index bucket
+      AGENT_INDEX_BUCKET = await ensureAgentIndexBucket();
+      if (!AGENT_INDEX_BUCKET) {
+        throw new Error('Could not create or find agent index bucket. Cannot fetch synthetic data and logs.');
+      }
+    } catch (error) {
+      console.error('[syntheticDataService] Error ensuring agent index bucket:', error);
+      throw error;
+    }
+  }
+  
+  try {
+    const syntheticDataKey = `synthetic-data/${timestamp}.json`;
+    const logKey = `logs/cot/${timestamp}.txt`;
+    
+    // Get synthetic data
+    const syntheticData = await getSyntheticDataObject(syntheticDataKey);
+    
+    // Get related logs
+    const logs = await getRelatedChainOfThoughtLog(timestamp);
+    
+    return {
+      timestamp,
+      syntheticData,
+      logs,
+      syntheticDataKey,
+      logKey,
+      bucket: AGENT_INDEX_BUCKET
+    };
+  } catch (error) {
+    console.error(`[syntheticDataService] Error fetching synthetic data and logs for timestamp ${timestamp}:`, error);
+    return null;
+  }
+}
+
+/**
+ * Verify that the agent index bucket exists and is accessible
+ * @returns {Promise<boolean>} True if the bucket exists and is accessible
+ */
+async function verifyAgentIndexBucket() {
+  // Ensure we have an agent index bucket
+  if (!AGENT_INDEX_BUCKET) {
+    console.log('[syntheticDataService] No AGENT_INDEX_BUCKET set; attempting to create or find one.');
+    try {
+      // Try to create or find the agent index bucket
+      AGENT_INDEX_BUCKET = await ensureAgentIndexBucket();
+      if (!AGENT_INDEX_BUCKET) {
+        return false;
+      }
+    } catch (error) {
+      console.error('[syntheticDataService] Error ensuring agent index bucket:', error);
+      return false;
+    }
+  }
+
+  try {
+    const recall = await recallService.createRecallClient();
+    await recallService.ensureCreditBalanceIfZero(recall);
+
+    const bucketManager = recall.bucketManager();
+    
+    // Try to get metadata to verify the bucket exists
+    const { result } = await bucketManager.getMetadata(AGENT_INDEX_BUCKET);
+    if (result && result.metadata) {
+      console.log('[syntheticDataService] Successfully verified agent index bucket:', AGENT_INDEX_BUCKET);
+      return true;
+    }
+    
+    return false;
+  } catch (error) {
+    console.error('[syntheticDataService] Error verifying agent index bucket:', error);
+    return false;
+  }
+}
+
+/**
+ * Creates or finds the agent index bucket and updates .env file if needed
+ * @returns {Promise<string>} The bucket address
+ */
+async function ensureAgentIndexBucket() {
+  try {
+    const recall = await recallService.createRecallClient();
+    await recallService.ensureCreditBalanceIfZero(recall);
+    const bucketManager = recall.bucketManager();
+
+    // Try to find existing bucket with alias "agent-index" by listing all buckets
+    const { result: bucketsResult } = await bucketManager.list();
+    const buckets = bucketsResult?.buckets || [];
+    let indexBucket = null;
+
+    // Check each bucket's metadata for the alias
+    for (const bucket of buckets) {
+      try {
+        const { result: metadataResult } = await bucketManager.getMetadata(bucket);
+        const metadata = metadataResult?.metadata || {};
+        if (metadata.alias === 'agent-index') {
+          console.log(`[syntheticDataService] Found bucket with alias 'agent-index': ${bucket}`);
+          indexBucket = bucket;
+          break;
+        }
+      } catch (error) {
+        console.warn(`[syntheticDataService] Error fetching metadata for bucket ${bucket}: ${error.message}`);
+      }
+    }
+
+    // If no index bucket found, create a new one
+    if (!indexBucket) {
+      console.log('[syntheticDataService] No agent index bucket found, creating a new one...');
+      const emptyObject = { message: 'Agent Index Bucket' };
+      const { bucket, key } = await recallService.createBucketAndAddObject(emptyObject, { 
+        metadata: { alias: 'agent-index' } 
+      });
+      indexBucket = bucket;
+
+      try {
+        const envPath = path.resolve(process.cwd(), '.env');
+        if (fs.existsSync(envPath)) {
+          let envContent = fs.readFileSync(envPath, 'utf8');
+          
+          // Check if AGENT_INDEX_BUCKET already exists in the file
+          if (envContent.includes('AGENT_INDEX_BUCKET=')) {
+            // Replace the existing value
+            envContent = envContent.replace(
+              /AGENT_INDEX_BUCKET=.*/,
+              `AGENT_INDEX_BUCKET=${indexBucket}`
+            );
+          } else {
+            // Add as a new line
+            envContent += `\nAGENT_INDEX_BUCKET=${indexBucket}\n`;
+          }
+          
+          // Write back to the .env file
+          fs.writeFileSync(envPath, envContent);
+          console.log('[syntheticDataService] Updated .env file with new AGENT_INDEX_BUCKET value.');
+        } else {
+          console.log('[syntheticDataService] .env file not found. Please add the AGENT_INDEX_BUCKET manually.');
+        }
+      } catch (fileError) {
+        console.warn('[syntheticDataService] Could not update .env file automatically:', fileError.message);
+        console.log('[syntheticDataService] Please add the AGENT_INDEX_BUCKET manually to your .env file.');
+      }
+    }
+
+    return indexBucket;
+  } catch (error) {
+    console.error('[syntheticDataService] Error ensuring agent index bucket:', error);
+    return null;
+  }
+}
 
 module.exports = {
   generateSynthetics,
   getSyntheticDataObject,
+  getSyntheticBuckets,
+  verifyAgentIndexBucket,
+  getRelatedChainOfThoughtLog,
+  getSyntheticDataAndLogs,
+  ensureAgentIndexBucket
 };
