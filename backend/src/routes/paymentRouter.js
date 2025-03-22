@@ -1,45 +1,34 @@
 const express = require('express');
 const router = express.Router();
-const syntheticDataService = require('../services/syntheticDataService');
+const tokenAccessService = require('../services/tokenAccessService');
 
 /**
- * Purchase access to a synthetic dataset
- * POST /api/access/purchase
+ * Get dataset price
+ * GET /api/access/price
  */
-router.post('/purchase', async (req, res) => {
+router.get('/price', async (req, res) => {
   try {
-    const { datasetTimestamp, userAddress, paymentProof } = req.body;
+    const { datasetTimestamp } = req.query;
     
-    if (!datasetTimestamp || !userAddress) {
+    if (!datasetTimestamp) {
       return res.status(400).json({ 
         success: false, 
-        message: 'Missing required fields: datasetTimestamp and userAddress' 
+        message: 'Missing required field: datasetTimestamp' 
       });
     }
     
-    // For MVP, we'll just validate that something was provided as payment proof
-    // In a real implementation, this would validate a blockchain transaction or token
-    if (!paymentProof) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Payment proof required' 
-      });
-    }
-    
-    // Grant access to the dataset
-    syntheticDataService.accessControl.grantAccess(datasetTimestamp, userAddress);
+    const price = await tokenAccessService.getDatasetPrice(datasetTimestamp);
     
     return res.status(200).json({
       success: true,
-      message: 'Access granted successfully',
       datasetTimestamp,
-      userAddress
+      price
     });
   } catch (error) {
-    console.error('Error purchasing access:', error);
+    console.error('Error getting dataset price:', error);
     return res.status(500).json({ 
       success: false, 
-      message: 'Error processing purchase: ' + error.message 
+      message: 'Error getting dataset price: ' + error.message 
     });
   }
 });
@@ -59,7 +48,7 @@ router.get('/check', async (req, res) => {
       });
     }
     
-    const hasAccess = syntheticDataService.accessControl.hasAccess(datasetTimestamp, userAddress);
+    const hasAccess = await tokenAccessService.checkAccess(userAddress, datasetTimestamp);
     
     return res.status(200).json({
       success: true,
@@ -91,7 +80,7 @@ router.get('/user-datasets', async (req, res) => {
       });
     }
     
-    const accessibleDatasets = syntheticDataService.accessControl.getUserAccessibleDatasets(userAddress);
+    const accessibleDatasets = await tokenAccessService.getUserAccessibleDatasets(userAddress);
     
     return res.status(200).json({
       success: true,
@@ -103,6 +92,29 @@ router.get('/user-datasets', async (req, res) => {
     return res.status(500).json({ 
       success: false, 
       message: 'Error fetching user datasets: ' + error.message 
+    });
+  }
+});
+
+/**
+ * Get contract information for frontend
+ * GET /api/access/contract-info
+ */
+router.get('/contract-info', async (req, res) => {
+  try {
+    const contractAddress = tokenAccessService.getContractAddress();
+    const contractABI = tokenAccessService.getContractABI();
+    
+    return res.status(200).json({
+      success: true,
+      contractAddress,
+      contractABI
+    });
+  } catch (error) {
+    console.error('Error getting contract info:', error);
+    return res.status(500).json({ 
+      success: false, 
+      message: 'Error getting contract info: ' + error.message 
     });
   }
 });

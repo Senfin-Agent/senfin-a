@@ -13,7 +13,6 @@ function AppRoutes() {
       <Route path="/" element={<Home />} />
       {/* changed path from "/verify" to "/synthesize" */}
       <Route path="/synthesize" element={<DataSynthesis />} />
-      <Route path="/wallet" element={<AgentWallet />} />
       <Route path="/recall" element={<RecallDashboard />} />
       <Route path="/recall" element={<RecallDashboard />} />
       <Route path="/agentindex" element={<AgentIndexDashboard />} />

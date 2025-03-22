@@ -15,12 +15,8 @@ function Navbar() {
           <Link to="/synthesize" className="hover:underline">
             Synthesize
           </Link>
-          <Link to="/wallet" className="hover:underline">
-            Wallet
-          </Link>
           <Link to="/recall" className="hover:underline">Recall</Link> 
-          <Link to="/agentindex" className="hover:underline">Agent Index</Link>
-
+          <Link to="/agentindex" className="hover:underline">Synthehized Data</Link>
 
         </div>
       </div>

@@ -1,6 +1,7 @@
 const crypto = require('crypto');
 const recallService = require('./recallService');
 const nillionSecretLLMService = require('./nillionSecretLLMService');
+const tokenAccessService = require('./tokenAccessService');
 const fs = require('fs');
 const path = require('path');
 
@@ -13,18 +14,18 @@ const path = require('path');
 function encryptData(data, userKey) {
   // Convert data to string if it's an object
   const dataString = typeof data === 'object' ? JSON.stringify(data) : data;
-  
+
   // Generate a random initialization vector
   const iv = crypto.randomBytes(16);
-  
+
   // Create cipher using AES-256-CBC with the user's key
   const key = crypto.createHash('sha256').update(userKey).digest();
   const cipher = crypto.createCipheriv('aes-256-cbc', key, iv);
-  
+
   // Encrypt the data
   let encrypted = cipher.update(dataString, 'utf8', 'hex');
   encrypted += cipher.final('hex');
-  
+
   return {
     encrypted,
     iv: iv.toString('hex')
@@ -40,15 +41,15 @@ function encryptData(data, userKey) {
 function decryptData(encryptedData, userKey) {
   try {
     const { encrypted, iv } = encryptedData;
-    
+
     // Create decipher
     const key = crypto.createHash('sha256').update(userKey).digest();
     const decipher = crypto.createDecipheriv('aes-256-cbc', key, Buffer.from(iv, 'hex'));
-    
+
     // Decrypt the data
     let decrypted = decipher.update(encrypted, 'hex', 'utf8');
     decrypted += decipher.final('utf8');
-    
+
     // Try to parse as JSON, return as string if not valid JSON
     try {
       return JSON.parse(decrypted);
@@ -68,36 +69,36 @@ function decryptData(encryptedData, userKey) {
 const accessControl = {
   // Storage for access rights
   accessRights: {},
-  
+
   // Grant access to a user for a specific dataset
-  grantAccess: function(datasetTimestamp, userAddress) {
+  grantAccess: function (datasetTimestamp, userAddress) {
     if (!this.accessRights[datasetTimestamp]) {
       this.accessRights[datasetTimestamp] = [];
     }
-    
+
     if (!this.accessRights[datasetTimestamp].includes(userAddress)) {
       this.accessRights[datasetTimestamp].push(userAddress);
     }
-    
+
     return true;
   },
-  
+
   // Check if a user has access to a dataset
-  hasAccess: function(datasetTimestamp, userAddress) {
+  hasAccess: function (datasetTimestamp, userAddress) {
     if (!this.accessRights[datasetTimestamp]) return false;
     return this.accessRights[datasetTimestamp].includes(userAddress);
   },
-  
+
   // Get all datasets a user has access to
-  getUserAccessibleDatasets: function(userAddress) {
+  getUserAccessibleDatasets: function (userAddress) {
     const accessibleDatasets = [];
-    
+
     for (const [timestamp, users] of Object.entries(this.accessRights)) {
       if (users.includes(userAddress)) {
         accessibleDatasets.push(timestamp);
       }
     }
-    
+
     return accessibleDatasets;
   }
 };
@@ -110,15 +111,18 @@ let AGENT_INDEX_BUCKET = process.env.AGENT_INDEX_BUCKET;
 /**
  * Generate a synthetic dataset using the TEE-based LLM service, then store it in the Agent Index Bucket.
  * Also store optional chain-of-thought or reasoning logs to the same agent index bucket with matching timestamp.
+ * Automatically register the dataset in the smart contract if adminAddress is provided.
  *
  * @param {Object} datasetSpec - Info needed to generate the synthetic data
  * @param {Object} sampleData - Optional sample data to base synthetic data on
  * @param {string} userKey - User's encryption key for encrypting sensitive data and logs
+ * @param {string} adminAddress - Admin address for registering dataset in smart contract (if null, won't register)
+ * @param {string} price - Price in ETH to purchase access (default: '0.001')
  * @returns {Promise<Object>} - References to the object key, etc.
  */
-async function generateSynthetics(datasetSpec, sampleData = null, userKey) {
+async function generateSynthetics(datasetSpec, sampleData = null, userKey, adminAddress = null, price = '0.000001') {
   console.log('[syntheticDataService] Generating synthetic data for:', datasetSpec);
-  
+
   // Ensure we have an agent index bucket
   if (!AGENT_INDEX_BUCKET) {
     console.log('[syntheticDataService] No AGENT_INDEX_BUCKET set; attempting to create or find one.');
@@ -250,7 +254,7 @@ The response must ONLY be the JSON object, with no code blocks or other text.`;
   const syntheticData = parseSyntheticData(syntheticDataText);
 
   validateSyntheticDataPrivacy(syntheticData);
-  
+
   // Add metadata to the synthetic data object including relationship to logs
   let syntheticDataWithMetadata = {
     ...syntheticData,
@@ -274,13 +278,58 @@ The response must ONLY be the JSON object, with no code blocks or other text.`;
       syntheticDataWithMetadata,
       syntheticDataKey
     );
-    
+
     console.log('[syntheticDataService] Stored synthetic data in agent index bucket:', {
       bucket: AGENT_INDEX_BUCKET,
       key: syntheticDataKey,
       txHash,
       relatedLogs: logKey
     });
+
+    let contractRegistrationResult = null;
+
+    // If an admin address was provided, register the dataset in the smart contract
+    // if (adminAddress) {
+
+    try {
+      console.log(`[syntheticDataService] Registering dataset ${timestamp} in smart contract with price ${price} ETH`);
+
+      // Generate the dataset ID
+      const datasetId = tokenAccessService.generateDatasetId(timestamp.toString());
+
+      // ACTUALLY REGISTER THE DATASET IN THE SMART CONTRACT
+      // No need to check for adminAddress - we'll always register datasets
+      const registrationTx = await tokenAccessService.registerDatasetInContract(
+        datasetId,
+        timestamp.toString(),
+        price,
+        adminAddress || process.env.ADMIN_ADDRESS
+      );
+
+      contractRegistrationResult = {
+        datasetId,
+        timestamp: timestamp.toString(),
+        price,
+        contractAddress: tokenAccessService.getContractAddress(),
+        successful: true,
+        transactionHash: registrationTx.transactionHash,
+        blockNumber: registrationTx.blockNumber
+      };
+
+      console.log(`[syntheticDataService] Dataset successfully registered in smart contract:`, {
+        datasetId,
+        timestamp: timestamp.toString(),
+        price,
+        contractAddress: tokenAccessService.getContractAddress(),
+        transactionHash: registrationTx.transactionHash
+      });
+    } catch (regError) {
+      console.error('[syntheticDataService] Error registering dataset in smart contract:', regError);
+      contractRegistrationResult = {
+        error: regError.message,
+        successful: false
+      };
+    }
 
     return {
       success: true,
@@ -289,7 +338,8 @@ The response must ONLY be the JSON object, with no code blocks or other text.`;
       objectKey: syntheticDataKey,
       transactionHash: txHash,
       timestamp,
-      relatedLogs: logKey
+      relatedLogs: logKey,
+      contractRegistration: contractRegistrationResult  // Include contract registration info
     };
   } catch (error) {
     console.error('[syntheticDataService] Error storing synthetic data:', error);
@@ -321,7 +371,7 @@ async function getSyntheticBuckets() {
     // Get all objects in the index bucket
     const recall = await recallService.createRecallClient();
     const bucketManager = recall.bucketManager();
-    
+
     // List all objects in the bucket
     const { result } = await bucketManager.list(AGENT_INDEX_BUCKET);
     const keys = result?.keys || [];
@@ -417,7 +467,7 @@ async function getSyntheticDataObject(key) {
       throw error;
     }
   }
-  
+
   console.log('[syntheticDataService] Fetching synthetic data from key:', key);
   const data = await recallService.getObject(AGENT_INDEX_BUCKET, key);
   return data;
@@ -444,19 +494,19 @@ async function getRelatedChainOfThoughtLog(timestamp) {
   }
 
   const logKey = `logs/cot/${timestamp}.txt`;
-  
+
   try {
     const recall = await recallService.createRecallClient();
     const bucketManager = recall.bucketManager();
-    
+
     // Get the log file as a buffer
     const { result } = await bucketManager.get(AGENT_INDEX_BUCKET, logKey);
-    
+
     // Convert buffer to string
     if (result && result.object) {
       return result.object.toString('utf8');
     }
-    
+
     throw new Error(`Log not found: ${logKey}`);
   } catch (error) {
     console.error(`[syntheticDataService] Error fetching related log for timestamp ${timestamp}:`, error);
@@ -530,17 +580,17 @@ async function getSyntheticDataAndLogs(timestamp) {
       throw error;
     }
   }
-  
+
   try {
     const syntheticDataKey = `synthetic-data/${timestamp}.json`;
     const logKey = `logs/cot/${timestamp}.txt`;
-    
+
     // Get synthetic data
     const syntheticData = await getSyntheticDataObject(syntheticDataKey);
-    
+
     // Get related logs
     const logs = await getRelatedChainOfThoughtLog(timestamp);
-    
+
     return {
       timestamp,
       syntheticData,
@@ -579,14 +629,14 @@ async function verifyAgentIndexBucket() {
     await recallService.ensureCreditBalanceIfZero(recall);
 
     const bucketManager = recall.bucketManager();
-    
+
     // Try to get metadata to verify the bucket exists
     const { result } = await bucketManager.getMetadata(AGENT_INDEX_BUCKET);
     if (result && result.metadata) {
       console.log('[syntheticDataService] Successfully verified agent index bucket:', AGENT_INDEX_BUCKET);
       return true;
     }
-    
+
     return false;
   } catch (error) {
     console.error('[syntheticDataService] Error verifying agent index bucket:', error);
@@ -628,8 +678,8 @@ async function ensureAgentIndexBucket() {
     if (!indexBucket) {
       console.log('[syntheticDataService] No agent index bucket found, creating a new one...');
       const emptyObject = { message: 'Agent Index Bucket' };
-      const { bucket, key } = await recallService.createBucketAndAddObject(emptyObject, { 
-        metadata: { alias: 'agent-index' } 
+      const { bucket, key } = await recallService.createBucketAndAddObject(emptyObject, {
+        metadata: { alias: 'agent-index' }
       });
       indexBucket = bucket;
 
@@ -637,7 +687,7 @@ async function ensureAgentIndexBucket() {
         const envPath = path.resolve(process.cwd(), '.env');
         if (fs.existsSync(envPath)) {
           let envContent = fs.readFileSync(envPath, 'utf8');
-          
+
           // Check if AGENT_INDEX_BUCKET already exists in the file
           if (envContent.includes('AGENT_INDEX_BUCKET=')) {
             // Replace the existing value
@@ -649,7 +699,7 @@ async function ensureAgentIndexBucket() {
             // Add as a new line
             envContent += `\nAGENT_INDEX_BUCKET=${indexBucket}\n`;
           }
-          
+
           // Write back to the .env file
           fs.writeFileSync(envPath, envContent);
           console.log('[syntheticDataService] Updated .env file with new AGENT_INDEX_BUCKET value.');

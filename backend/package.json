@@ -14,6 +14,7 @@
     "@recallnet/chains": "^0.0.6",
     "@recallnet/sdk": "^0.0.7",
     "dotenv": "^16.4.7",
+    "ethers": "^5.7.2",
     "express": "^4.21.2",
     "node-fetch": "^2.7.0",
     "viem": "^2.23.13"
