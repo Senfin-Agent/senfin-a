@@ -5,7 +5,7 @@ const AGENT_INDEX_BUCKET = process.env.AGENT_INDEX_BUCKET;
 exports.listObjects = async (req, res) => {
   try {
     const prefix = req.query.prefix || '';
-    const objects = await recallService.getObject(AGENT_INDEX_BUCKET, prefix);
+    const objects = await recallService.queryBucket(AGENT_INDEX_BUCKET, prefix);
     return res.json({ objects });
   } catch (err) {
     console.error('listObjects error:', err);
