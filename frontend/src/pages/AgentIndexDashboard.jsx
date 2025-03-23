@@ -61,20 +61,13 @@ function AgentIndexDashboard() {
       return content;
     }
     if (typeof content === 'object') {
-      // Handle the specific object format with type, rawText, json
       if (content.type && (content.rawText !== undefined || content.json !== undefined)) {
-        if (content.rawText) {
-          return content.rawText;
-        }
-        if (content.json) {
-          return JSON.stringify(content.json, null, 2);
-        }
+        if (content.rawText) return content.rawText;
+        if (content.json) return JSON.stringify(content.json, null, 2);
         return JSON.stringify(content, null, 2);
       }
-      // For normal objects, just stringify them
       return JSON.stringify(content, null, 2);
     }
-    // For any other type, convert to string
     return String(content);
   }
 
@@ -84,7 +77,7 @@ function AgentIndexDashboard() {
     return match ? match[1] : null;
   };
 
-  // Group objects by timestamp and filter valid pairs
+  // Group objects by timestamp and filter to valid pairs (logs and synthetic)
   const groupObjectsByTimestamp = (objects) => {
     const tempGrouped = {};
     objects.forEach(obj => {
@@ -99,7 +92,6 @@ function AgentIndexDashboard() {
         tempGrouped[timestamp].synthetic.push(obj);
       }
     });
-    // Filter to only include timestamps that have both logs and synthetic data
     const validGrouped = {};
     Object.entries(tempGrouped).forEach(([timestamp, group]) => {
       if (group.logs.length > 0 && group.synthetic.length > 0) {
@@ -109,7 +101,7 @@ function AgentIndexDashboard() {
     return validGrouped;
   };
 
-  // Format timestamp to readable date
+  // Format timestamp to a readable date
   const formatTimestamp = (timestamp) => {
     const date = new Date(parseInt(timestamp));
     return date.toLocaleString();
@@ -125,8 +117,6 @@ function AgentIndexDashboard() {
       setStatus('Connecting to wallet...');
       const address = await web3Service.connectWallet();
       setUserAddress(address);
-
-      // Check if the connected account is the contract owner (admin)
       const isOwner = await web3Service.isContractOwner(address);
       setIsAdmin(isOwner);
       setStatus(isOwner ? `Connected to wallet: ${address} (Admin)` : `Connected to wallet: ${address}`);
@@ -169,8 +159,9 @@ function AgentIndexDashboard() {
           return;
         }
       }
+      // Only synthetic data requires purchase; logs are public
       if (accessibleDatasets.includes(timestamp)) {
-        setStatus(`You already have access to dataset ${timestamp}`);
+        setStatus(`You already have access to synthetic data for dataset ${timestamp}`);
         return;
       }
       setPurchaseLoading(prev => ({ ...prev, [timestamp]: true }));
@@ -189,22 +180,8 @@ function AgentIndexDashboard() {
       const datasetId = web3Service.generateDatasetId(timestamp);
       const result = await web3Service.purchaseAccess(datasetId, price);
       if (result.success) {
-        setStatus(`Successfully purchased access to dataset ${timestamp}. Transaction: ${result.transactionHash}`);
+        setStatus(`Successfully purchased access to synthetic data for dataset ${timestamp}. Transaction: ${result.transactionHash}`);
         setAccessibleDatasets(prev => [...prev, timestamp]);
-
-        // Load data for the newly accessible dataset if the group is expanded
-        if (expandedGroups[timestamp] && groupedObjects[timestamp]) {
-          groupedObjects[timestamp].logs.forEach(obj => {
-            if (!fetchedData[obj.key]) {
-              handleFetch(obj.key, timestamp);
-            }
-          });
-          groupedObjects[timestamp].synthetic.forEach(obj => {
-            if (!fetchedData[obj.key]) {
-              handleFetch(obj.key, timestamp);
-            }
-          });
-        }
       } else {
         setStatus(`Failed to purchase access: ${result.error}`);
       }
@@ -254,7 +231,7 @@ function AgentIndexDashboard() {
     }
   };
 
-  // Check if user has access to datasets using Web3
+  // Check if user has access (for synthetic data) and pre-fetch prices
   const checkUserAccess = async (address) => {
     if (!address || !web3Available) return;
     try {
@@ -266,7 +243,6 @@ function AgentIndexDashboard() {
         if (hasAccess) {
           accessibleTimestamps.push(timestamp);
         }
-        // Also pre-fetch the dataset price
         await fetchDatasetPrice(timestamp);
       }
       setAccessibleDatasets(accessibleTimestamps);
@@ -275,14 +251,14 @@ function AgentIndexDashboard() {
     }
   };
 
-  // Get unregistered datasets (for admin)
+  // Get unregistered datasets (for admin) – unchanged
   const unregisteredDatasets = useMemo(() => {
     return Object.keys(groupedObjects).filter(timestamp =>
       !datasetPrices[timestamp] || datasetPrices[timestamp] === '0'
     );
   }, [groupedObjects, datasetPrices]);
 
-  // Load all objects on component mount
+  // Load objects on component mount
   useEffect(() => {
     async function loadObjects() {
       try {
@@ -291,7 +267,6 @@ function AgentIndexDashboard() {
         setError(null);
         const res = await listAgentObjects('');
         const objects = res.data.objects || [];
-        // Filter out objects that don't match the correct pattern
         const validObjects = objects.filter(obj => {
           return (
             (obj.key.startsWith('logs/cot/') && obj.key.endsWith('.txt')) ||
@@ -300,14 +275,11 @@ function AgentIndexDashboard() {
         });
         const grouped = groupObjectsByTimestamp(validObjects);
         setGroupedObjects(grouped);
-
-        // Initialize expanded state for all groups
         const initialExpandedState = {};
         Object.keys(grouped).forEach(timestamp => {
-          initialExpandedState[timestamp] = false; // Start collapsed
+          initialExpandedState[timestamp] = false;
         });
         setExpandedGroups(initialExpandedState);
-
         const groupCount = Object.keys(grouped).length;
         setStatus(`Loaded ${groupCount} timestamp groups with matching log and synthetic data pairs`);
       } catch (err) {
@@ -321,58 +293,51 @@ function AgentIndexDashboard() {
     loadObjects();
   }, []);
 
-  // Try to decrypt the data with the provided key
-  const decryptObject = (encryptedData) => {
-    if (!decryptionKey) {
-      return "Enter decryption key to view data";
-    }
-    try {
-      if (encryptedData && encryptedData.encrypted && encryptedData.iv) {
-        return `Decrypted data would appear here. Using key: ${decryptionKey.substring(0, 3)}...`;
-      } else {
-        return "Invalid encrypted data format";
-      }
-    } catch (error) {
-      console.error('Error decrypting data:', error);
-      return "Decryption failed. Invalid key or corrupted data.";
-    }
-  };
-
+  // Modified handleFetch to allow logs to be public
   async function handleFetch(key, timestamp) {
-    try {
-      const hasAccess = accessibleDatasets.includes(timestamp);
-      if (!hasAccess) {
+    const isLog = key.startsWith('logs/cot/');
+    if (!isLog) {
+      // For synthetic data, require access
+      if (!accessibleDatasets.includes(timestamp)) {
         setFetchedData(prev => ({
           ...prev,
           [key]: {
             raw: null,
-            decrypted: "You don't have access to this data. Please purchase access."
+            decrypted: "You don't have access to this synthetic data. Please purchase access."
           }
         }));
         return;
       }
-      if (fetchedData[key]) return;
-      setStatus(`Fetching data for ${key}...`);
+    }
+    if (fetchedData[key]) return;
+    setStatus(`Fetching data for ${key}...`);
+    try {
       const res = await fetchAgentObject(key);
       const content = res.data.content;
-      let decryptedContent;
-      if (content && content.encryptedData) {
-        decryptedContent = decryptObject(content.encryptedData);
-      } else if (typeof content === 'string' && content.includes('"encrypted":') && content.includes('"iv":')) {
-        try {
-          const parsedContent = JSON.parse(content);
-          decryptedContent = decryptObject(parsedContent);
-        } catch (e) {
-          decryptedContent = processContent(content);
-        }
+      let processedContent;
+      // For logs, assume data is in plain text
+      if (isLog) {
+        processedContent = processContent(content);
       } else {
-        decryptedContent = processContent(content);
+        // For synthetic data, attempt decryption if needed
+        if (content && content.encryptedData) {
+          processedContent = `Decrypted data would appear here. Using key: ${decryptionKey.substring(0, 3)}...`;
+        } else if (typeof content === 'string' && content.includes('"encrypted":') && content.includes('"iv":')) {
+          try {
+            const parsedContent = JSON.parse(content);
+            processedContent = `Decrypted data would appear here. Using key: ${decryptionKey.substring(0, 3)}...`;
+          } catch (e) {
+            processedContent = processContent(content);
+          }
+        } else {
+          processedContent = processContent(content);
+        }
       }
       setFetchedData(prev => ({
         ...prev,
         [key]: {
           raw: content,
-          decrypted: decryptedContent
+          decrypted: processedContent
         }
       }));
       setStatus('');
@@ -389,32 +354,30 @@ function AgentIndexDashboard() {
     }
   }
 
+  // Toggle group expansion and load data if needed
   const toggleGroup = (timestamp) => {
     const isCurrentlyExpanded = expandedGroups[timestamp];
     setExpandedGroups(prev => ({
       ...prev,
       [timestamp]: !prev[timestamp]
     }));
-    // When expanding, try to load data if user has access
-    if (!isCurrentlyExpanded) {
-      if (groupedObjects[timestamp]) {
-        const hasAccess = accessibleDatasets.includes(timestamp);
-        if (hasAccess) {
-          groupedObjects[timestamp].logs.forEach(obj => {
-            if (!fetchedData[obj.key]) {
-              handleFetch(obj.key, timestamp);
-            }
-          });
-          groupedObjects[timestamp].synthetic.forEach(obj => {
-            if (!fetchedData[obj.key]) {
-              handleFetch(obj.key, timestamp);
-            }
-          });
+    if (!isCurrentlyExpanded && groupedObjects[timestamp]) {
+      // For logs, always try to load data
+      groupedObjects[timestamp].logs.forEach(obj => {
+        if (!fetchedData[obj.key]) {
+          handleFetch(obj.key, timestamp);
         }
-        // Fetch price if not already loaded
-        if (!datasetPrices[timestamp]) {
-          fetchDatasetPrice(timestamp);
-        }
+      });
+      // For synthetic data, load only if access is available
+      if (accessibleDatasets.includes(timestamp)) {
+        groupedObjects[timestamp].synthetic.forEach(obj => {
+          if (!fetchedData[obj.key]) {
+            handleFetch(obj.key, timestamp);
+          }
+        });
+      }
+      if (!datasetPrices[timestamp]) {
+        fetchDatasetPrice(timestamp);
       }
     }
   };
@@ -430,303 +393,304 @@ function AgentIndexDashboard() {
       </div>
     );
   }
-
   return (
-    <div className="mx-auto max-w-4xl p-6">
-      <h1 className="text-2xl font-bold mb-4">Stored Synthetic Data</h1>
-
-      <div className="flex items-center mb-4 space-x-2">
-        <div className="p-2 bg-gray-100 rounded">
-          Wallet: {userAddress ? (
-            <span>
-              {userAddress} {isAdmin && <span className="text-purple-600 font-semibold">(Admin)</span>}
-            </span>
-          ) : 'Not connected'}
-        </div>
-
-        {/* <button
-          onClick={connectWallet}
-          className="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600"
-        >
-          {userAddress ? 'Change Wallet' : 'Connect Wallet'}
-        </button> */}
-
-        <div className="flex-1"></div>
-
-        {/* <input
-          type="password"
-          placeholder="Decryption Key"
-          value={decryptionKey}
-          onChange={(e) => setDecryptionKey(e.target.value)}
-          className="p-2 border rounded"
-        /> */}
-      </div>
-
-      {!web3Available && (
-        <div className="mb-4 p-2 bg-yellow-50 border border-yellow-200 rounded">
-          <p className="text-yellow-800">
-            Web3 is not available. Please install MetaMask to purchase access to datasets.
+    <div className="min-h-screen pt-20 pb-10 bg-gradient-to-br from-blue-50 to-indigo-50">
+      <div className="mx-auto max-w-4xl bg-white rounded-3xl shadow-xl p-8">
+        <div className="text-center mb-8">
+          <h1 className="text-3xl font-bold bg-gradient-to-r from-blue-600 to-indigo-800 bg-clip-text text-transparent">
+            Stored Synthetic Data
+          </h1>
+          <p className="mt-3 text-gray-600">
+            Access and manage your stored data securely with blockchain verification.
           </p>
         </div>
-      )}
 
-      {status && (
-        <div className={`mb-4 p-2 ${error ? 'bg-red-100' : 'bg-blue-50'} border rounded text-sm`}>
-          {status}
-        </div>
-      )}
-
-      {accessibleDatasets.length > 0 && (
-        <div className="mb-4 p-2 bg-green-50 border border-green-200 rounded">
-          <h3 className="font-medium text-green-800">Your Accessible Datasets</h3>
-          <div className="mt-1 flex flex-wrap gap-2">
-            {accessibleDatasets.map(timestamp => (
-              <div key={timestamp}
-                className="px-2 py-1 bg-green-100 text-green-800 rounded text-sm cursor-pointer hover:bg-green-200"
-                onClick={() => {
-                  toggleGroup(timestamp);
-                  const element = document.getElementById(`dataset-${timestamp}`);
-                  if (element) element.scrollIntoView({ behavior: 'smooth' });
-                }}
-              >
-                {formatTimestamp(timestamp)}
+        <div className="space-y-6">
+          <div className="bg-blue-50 rounded-xl p-6 border border-blue-100">
+            <div className="flex items-center mb-4 space-x-2">
+              <div className="p-2 bg-white rounded-lg shadow-sm">
+                Wallet: {userAddress ? (
+                  <span className="font-medium">
+                    {userAddress} {isAdmin && <span className="text-purple-600 font-semibold">(Admin)</span>}
+                  </span>
+                ) : 'Not connected'}
               </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {Object.keys(groupedObjects).length === 0 ? (
-        <div className="p-4 border bg-gray-50 text-center">
-          No matching log and synthetic data pairs found
-        </div>
-      ) : (
-        <div className="space-y-4">
-          {Object.entries(groupedObjects)
-            .sort(([a], [b]) => b.localeCompare(a))
-            .map(([timestamp, group]) => {
-              const hasAccess = accessibleDatasets.includes(timestamp);
-              const price = datasetPrices[timestamp] || '0';
-              const isRegistered = price !== '0';
-              return (
-                <div key={timestamp} id={`dataset-${timestamp}`} className="border rounded overflow-hidden">
-                  <div
-                    className={`p-3 flex justify-between items-center cursor-pointer ${hasAccess ? 'bg-green-50' : 'bg-gray-100'}`}
-                    onClick={() => toggleGroup(timestamp)}
-                  >
-                    <div>
-                      <span className="font-medium">{formatTimestamp(timestamp)}</span>
-                      <span className="ml-2 text-gray-500 text-sm">
-                        ({group.logs.length} logs, {group.synthetic.length} synthetic data files)
-                      </span>
-                      {hasAccess ? (
-                        <span className="ml-2 text-green-600 text-sm font-semibold">
-                          Access Granted
-                        </span>
-                      ) : (
-                        <span className="ml-2 text-red-600 text-sm font-semibold">
-                          Access Required
-                        </span>
-                      )}
-                      {isRegistered && !hasAccess && (
-                        <span className="ml-2 text-blue-600 text-sm">
-                          Price: {price} ETH
-                        </span>
-                      )}
-                    </div>
-                    <div className="flex items-center space-x-2">
-                      {!hasAccess && isRegistered && (
-                        <button
-                          className={`px-2 py-1 bg-blue-500 text-white text-sm rounded hover:bg-blue-600 disabled:bg-gray-400 disabled:cursor-not-allowed`}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            handlePurchaseAccess(timestamp);
-                          }}
-                          disabled={purchaseLoading[timestamp] || !web3Available}
-                        >
-                          {purchaseLoading[timestamp] ? (
-                            <span className="flex items-center">
-                              <svg className="animate-spin -ml-1 mr-2 h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                              </svg>
-                              Processing...
-                            </span>
-                          ) : (
-                            'Purchase Access'
-                          )}
-                        </button>
-                      )}
-
-                      {!hasAccess && !isRegistered && (
-                        <span className="text-gray-500 text-xs italic">Not available for purchase</span>
-                      )}
-
-                      <button className="text-gray-500">
-                        {expandedGroups[timestamp] ? '▼' : '►'}
-                      </button>
-                    </div>
-                  </div>
-
-                  {expandedGroups[timestamp] && (
-                    <div className="p-3 bg-white">
-                      {!hasAccess ? (
-                        <div className="p-4 bg-yellow-50 border border-yellow-200 rounded text-center">
-                          <p className="text-yellow-800">
-                            You need to purchase access to view this data.
-                          </p>
-                          {isRegistered ? (
-                            <button
-                              className="mt-2 px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 disabled:bg-gray-400 disabled:cursor-not-allowed"
-                              onClick={() => handlePurchaseAccess(timestamp)}
-                              disabled={purchaseLoading[timestamp] || !web3Available || hasAccess}
-                            >
-                              {purchaseLoading[timestamp] ? (
-                                <span className="flex items-center justify-center">
-                                  <svg className="animate-spin -ml-1 mr-2 h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                                  </svg>
-                                  Processing...
-                                </span>
-                              ) : (
-                                `Purchase Access (${price} ETH)`
-                              )}
-                            </button>
-                          ) : (
-                            <p className="mt-2 text-gray-600 italic">
-                              This dataset is not available for purchase yet.
-                            </p>
-                          )}
-                        </div>
-                      ) : (
-                        <div className="grid grid-cols-2 gap-4">
-                          {/* Logs Column */}
-                          <div className="border rounded p-3 bg-gray-50">
-                            <h3 className="font-medium text-blue-600 mb-2">Logs</h3>
-                            <ul className="space-y-2">
-                              {group.logs.map((obj, idx) => (
-                                <li key={idx} className="text-sm">
-                                  <div className="font-medium truncate">{obj.key}</div>
-                                  {fetchedData[obj.key] ? (
-                                    <div className="mt-1 p-2 bg-white border rounded max-h-64 overflow-auto">
-                                      <pre className="text-xs whitespace-pre-wrap">
-                                        {typeof fetchedData[obj.key].decrypted === 'object'
-                                          ? JSON.stringify(fetchedData[obj.key].decrypted, null, 2)
-                                          : fetchedData[obj.key].decrypted}
-                                      </pre>
-                                    </div>
-                                  ) : (
-                                    <div
-                                      className="mt-1 p-2 bg-white border rounded cursor-pointer text-center"
-                                      onClick={() => handleFetch(obj.key, timestamp)}
-                                    >
-                                      Click to load data
-                                    </div>
-                                  )}
-                                </li>
-                              ))}
-                            </ul>
-                          </div>
-
-                          {/* Synthetic Data Column */}
-                          <div className="border rounded p-3 bg-gray-50">
-                            <h3 className="font-medium text-green-600 mb-2">Synthetic Data</h3>
-                            <ul className="space-y-2">
-                              {group.synthetic.map((obj, idx) => (
-                                <li key={idx} className="text-sm">
-                                  <div className="font-medium truncate">{obj.key}</div>
-                                  {fetchedData[obj.key] ? (
-                                    <div className="mt-1 p-2 bg-white border rounded max-h-64 overflow-auto">
-                                      <pre className="text-xs whitespace-pre-wrap">
-                                        {typeof fetchedData[obj.key].decrypted === 'object'
-                                          ? JSON.stringify(fetchedData[obj.key].decrypted, null, 2)
-                                          : fetchedData[obj.key].decrypted}
-                                      </pre>
-                                    </div>
-                                  ) : (
-                                    <div
-                                      className="mt-1 p-2 bg-white border rounded cursor-pointer text-center"
-                                      onClick={() => handleFetch(obj.key, timestamp)}
-                                    >
-                                      Click to load data
-                                    </div>
-                                  )}
-                                </li>
-                              ))}
-                            </ul>
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-        </div>
-      )}
-
-      {/* Admin Panel for Dataset Registration */}
-      {/* {isAdmin && (
-        <div className="mt-8 p-4 border border-gray-200 rounded bg-gray-50">
-          <h3 className="text-lg font-semibold mb-3">Admin: Register Dataset for Purchase</h3>
-          <div className="space-y-4">
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">
-                Dataset Timestamp
-              </label>
-              <select
-                className="w-full p-2 border rounded"
-                value={registerTimestamp}
-                onChange={(e) => setRegisterTimestamp(e.target.value)}
-              >
-                <option value="">Select dataset</option>
-                {unregisteredDatasets.map(timestamp => (
-                  <option key={timestamp} value={timestamp}>
-                    {formatTimestamp(timestamp)}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">
-                Price (ETH)
-              </label>
-              <input
-                type="text"
-                value={registerPrice}
-                onChange={(e) => setRegisterPrice(e.target.value)}
-                className="w-full p-2 border rounded"
-                placeholder="0.001"
-              />
-            </div>
-
-            <button
-              className="px-4 py-2 bg-purple-600 text-white rounded hover:bg-purple-700 disabled:bg-gray-400 disabled:cursor-not-allowed"
-              onClick={handleRegisterDataset}
-              disabled={isRegistering || !web3Available || !userAddress}
-            >
-              {isRegistering ? (
-                <span className="flex items-center justify-center">
-                  <svg className="animate-spin -ml-1 mr-2 h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                  </svg>
-                  Registering...
-                </span>
-              ) : (
-                'Register Dataset'
+              {!userAddress && (
+                <button
+                  onClick={connectWallet}
+                  className="px-4 py-2 bg-gradient-to-r from-blue-600 to-indigo-700 text-white font-medium rounded-lg hover:shadow-md transition-all"
+                >
+                  Connect Wallet
+                </button>
               )}
-            </button>
+            </div>
 
-            <p className="text-xs text-gray-500 mt-2">
-              This will use your connected MetaMask wallet to register the dataset on the blockchain.
-              Only the contract owner can register datasets.
-            </p>
+            {!web3Available && (
+              <div className="mb-4 p-4 bg-yellow-50 border border-yellow-200 rounded-lg flex items-start gap-3">
+                <svg className="w-6 h-6 flex-shrink-0 text-yellow-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                </svg>
+                <p className="text-yellow-800">
+                  Web3 is not available. Please install MetaMask to purchase access to datasets.
+                </p>
+              </div>
+            )}
+
+            {status && (
+              <div className={`p-4 ${error ? 'bg-red-50 border-red-200 text-red-700' : 'bg-blue-50 border-blue-200 text-blue-700'} border rounded-lg flex items-start gap-3`}>
+                <svg className="w-6 h-6 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d={error ? "M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" : "M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"} />
+                </svg>
+                <p>{status}</p>
+              </div>
+            )}
+
+            {accessibleDatasets.length > 0 && (
+              <div className="mt-4 p-4 bg-green-50 border border-green-200 rounded-lg">
+                <h3 className="font-medium text-green-800 mb-2">Your Accessible Synthetic Datasets</h3>
+                <div className="flex flex-wrap gap-2">
+                  {accessibleDatasets.map(timestamp => (
+                    <div key={timestamp}
+                      className="px-3 py-1.5 bg-green-100 text-green-800 rounded-lg text-sm cursor-pointer hover:bg-green-200 transition-colors shadow-sm"
+                      onClick={() => {
+                        toggleGroup(timestamp);
+                        const element = document.getElementById(`dataset-${timestamp}`);
+                        if (element) element.scrollIntoView({ behavior: 'smooth' });
+                      }}
+                    >
+                      {formatTimestamp(timestamp)}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* {isAdmin && ( */}
+             <div className="bg-indigo-50 rounded-xl p-6 border border-indigo-100">
+              {/* <h3 className="font-medium text-indigo-800 mb-3">Admin Controls: Register Dataset</h3> */}
+              {/* <div className="flex flex-col sm:flex-row gap-3">
+                <select
+                  value={registerTimestamp}
+                  onChange={(e) => setRegisterTimestamp(e.target.value)}
+                  className="border border-indigo-200 rounded-lg px-4 py-2 focus:ring-2 focus:ring-indigo-300 focus:border-indigo-300 outline-none"
+                >
+                  <option value="">Select a dataset to register</option>
+                  {unregisteredDatasets.map(t => (
+                    <option key={t} value={t}>{formatTimestamp(t)}</option>
+                  ))}
+                </select>
+                <input
+                  type="number"
+                  step="0.001"
+                  min="0.001"
+                  value={registerPrice}
+                  onChange={(e) => setRegisterPrice(e.target.value)}
+                  className="border border-indigo-200 rounded-lg px-4 py-2 focus:ring-2 focus:ring-indigo-300 focus:border-indigo-300 outline-none"
+                  placeholder="Price in ETH"
+                />
+                <button
+                  onClick={handleRegisterDataset}
+                  disabled={isRegistering || !registerTimestamp || !registerPrice}
+                  className="px-4 py-2 bg-gradient-to-r from-indigo-600 to-purple-700 text-white font-medium rounded-lg hover:shadow-md transition-all disabled:opacity-70 disabled:cursor-not-allowed"
+                >
+                  {isRegistering ? (
+                    <span className="flex items-center">
+                      <svg className="animate-spin -ml-1 mr-2 h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                      </svg>
+                      Registering...
+                    </span>
+                  ) : "Register Dataset"}
+                </button>
+              </div>
+            </div> */}
+          {/* )} */}
+
+          {/* <div className="mt-6"> */}
+            {Object.keys(groupedObjects).length === 0 ? (
+              <div className="p-6 border bg-gray-50 text-center rounded-xl">
+                <svg className="w-16 h-16 mx-auto text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20 13V6a2 2 0 00-2-2H6a2 2 0 00-2 2v7m16 0v5a2 2 0 01-2 2H6a2 2 0 01-2-2v-5m16 0h-2.586a1 1 0 00-.707.293l-2.414 2.414a1 1 0 01-.707.293h-3.172a1 1 0 01-.707-.293l-2.414-2.414A1 1 0 006.586 13H4" />
+                </svg>
+                <p className="mt-4 text-gray-600">No matching log and synthetic data pairs found</p>
+              </div>
+            ) : (
+              <div className="space-y-4">
+                {Object.entries(groupedObjects)
+                  .sort(([a], [b]) => b.localeCompare(a))
+                  .map(([timestamp, group]) => {
+                    const hasAccess = accessibleDatasets.includes(timestamp);
+                    const price = datasetPrices[timestamp] || '0';
+                    const isRegistered = price !== '0';
+
+                    return (
+                      <div key={timestamp} id={`dataset-${timestamp}`} className="border rounded-xl overflow-hidden shadow-sm hover:shadow-md transition-all">
+                        <div
+                          className={`p-4 flex justify-between items-center cursor-pointer ${hasAccess ? 'bg-gradient-to-r from-green-50 to-blue-50' : 'bg-gradient-to-r from-gray-50 to-blue-50'}`}
+                          onClick={() => toggleGroup(timestamp)}
+                        >
+                          <div>
+                            <span className="font-medium">{formatTimestamp(timestamp)}</span>
+                            <span className="ml-2 text-gray-500 text-sm">
+                              ({group.logs.length} logs, {group.synthetic.length} synthetic data files)
+                            </span>
+                            {hasAccess ? (
+                              <span className="ml-2 text-green-600 text-sm font-semibold bg-green-100 px-2 py-0.5 rounded-full">
+                                Access Granted
+                              </span>
+                            ) : (
+                              <span className="ml-2 text-red-600 text-sm font-semibold bg-red-100 px-2 py-0.5 rounded-full">
+                                Synthetic Access Required
+                              </span>
+                            )}
+                            {isRegistered && !hasAccess && (
+                              <span className="ml-2 text-blue-600 text-sm bg-blue-100 px-2 py-0.5 rounded-full">
+                                Price: {price} ETH
+                              </span>
+                            )}
+                          </div>
+                          <div className="flex items-center space-x-2">
+                            {!hasAccess && isRegistered && (
+                              <button
+                                className="px-3 py-1.5 bg-gradient-to-r from-blue-600 to-indigo-700 text-white text-sm rounded-lg hover:shadow-md disabled:opacity-70 disabled:cursor-not-allowed transition-all"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handlePurchaseAccess(timestamp);
+                                }}
+                                disabled={purchaseLoading[timestamp] || !web3Available}
+                              >
+                                {purchaseLoading[timestamp] ? (
+                                  <span className="flex items-center">
+                                    <svg className="animate-spin -ml-1 mr-2 h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                    </svg>
+                                    Processing...
+                                  </span>
+                                ) : (
+                                  `Purchase (${price} ETH)`
+                                )}
+                              </button>
+                            )}
+                            <svg
+                              className={`w-5 h-5 text-gray-500 transition-transform duration-200 ${expandedGroups[timestamp] ? 'transform rotate-180' : ''}`}
+                              fill="none"
+                              stroke="currentColor"
+                              viewBox="0 0 24 24"
+                              xmlns="http://www.w3.org/2000/svg"
+                            >
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                            </svg>
+                          </div>
+                        </div>
+
+                        {expandedGroups[timestamp] && (
+                          <div className="p-4 bg-white">
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                              {/* Logs Column - always visible */}
+                              <div className="border rounded-xl p-4 bg-blue-50 shadow-inner">
+                                <h3 className="font-medium text-blue-800 mb-3 flex items-center gap-2">
+                                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                                  </svg>
+                                  Logs
+                                </h3>
+                                <ul className="space-y-3">
+                                  {group.logs.map((obj, idx) => (
+                                    <li key={idx} className="text-sm">
+                                      <div className="font-medium truncate">{obj.key}</div>
+                                      {fetchedData[obj.key] ? (
+                                        <div className="mt-2 p-3 bg-white border rounded-lg max-h-64 overflow-auto shadow-sm">
+                                          <pre className="text-xs whitespace-pre-wrap">
+                                            {fetchedData[obj.key].decrypted}
+                                          </pre>
+                                        </div>
+                                      ) : (
+                                        <div
+                                          className="mt-2 p-3 bg-white border rounded-lg cursor-pointer text-center hover:bg-gray-50 transition-colors shadow-sm"
+                                          onClick={() => handleFetch(obj.key, timestamp)}
+                                        >
+                                          <span className="text-blue-600">Click to load data</span>
+                                        </div>
+                                      )}
+                                    </li>
+                                  ))}
+                                </ul>
+                              </div>
+
+                              {/* Synthetic Data Column - gated by access */}
+                              <div className="border rounded-xl p-4 bg-green-50 shadow-inner">
+                                <h3 className="font-medium text-green-800 mb-3 flex items-center gap-2">
+                                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                                  </svg>
+                                  Synthetic Data
+                                </h3>
+                                {hasAccess ? (
+                                  <ul className="space-y-3">
+                                    {group.synthetic.map((obj, idx) => (
+                                      <li key={idx} className="text-sm">
+                                        <div className="font-medium truncate">{obj.key}</div>
+                                        {fetchedData[obj.key] ? (
+                                          <div className="mt-2 p-3 bg-white border rounded-lg max-h-64 overflow-auto shadow-sm">
+                                            <pre className="text-xs whitespace-pre-wrap">
+                                              {fetchedData[obj.key].decrypted}
+                                            </pre>
+                                          </div>
+                                        ) : (
+                                          <div
+                                            className="mt-2 p-3 bg-white border rounded-lg cursor-pointer text-center hover:bg-gray-50 transition-colors shadow-sm"
+                                            onClick={() => handleFetch(obj.key, timestamp)}
+                                          >
+                                            <span className="text-green-600">Click to load data</span>
+                                          </div>
+                                        )}
+                                      </li>
+                                    ))}
+                                  </ul>
+                                ) : (
+                                  <div className="p-6 text-center bg-white rounded-lg border">
+                                    <svg className="w-12 h-12 mx-auto text-yellow-500 mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+                                    </svg>
+                                    <p className="text-gray-800 mb-3">You need to purchase access to view synthetic data</p>
+                                    {isRegistered ? (
+                                      <button
+                                        className="px-6 py-2 bg-gradient-to-r from-blue-600 to-indigo-700 text-white rounded-lg hover:shadow-md disabled:opacity-70 disabled:cursor-not-allowed transition-all"
+                                        onClick={() => handlePurchaseAccess(timestamp)}
+                                        disabled={purchaseLoading[timestamp] || !web3Available}
+                                      >
+                                        {purchaseLoading[timestamp] ? (
+                                          <span className="flex items-center justify-center">
+                                            <svg className="animate-spin -ml-1 mr-2 h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                            </svg>
+                                            Processing...
+                                          </span>
+                                        ) : (
+                                          `Purchase Access (${price} ETH)`
+                                        )}
+                                      </button>
+                                    ) : (
+                                      <p className="text-gray-600 italic">This dataset is not available for purchase yet</p>
+                                    )}
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+              </div>
+            )}
           </div>
         </div>
-      )} */}
+      </div>
     </div>
   );
 }

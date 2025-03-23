@@ -62,6 +62,9 @@ function decryptData(encryptedData, userKey) {
   }
 }
 
+
+
+
 /**
  * Access control system for token-gated data
  * Simple implementation for MVP
@@ -104,10 +107,57 @@ const accessControl = {
 };
 
 /**
+ * Generate detailed chain-of-thought logs explaining the synthetic data generation process
+ * @param {Object} datasetSpec - Original data specification
+ * @param {Object} syntheticData - The generated synthetic data
+ * @returns {Promise<string>} - Generated CoT logs
+ */
+async function generateChainOfThoughtLogs(datasetSpec, syntheticData) {
+  console.log('[syntheticDataService] Generating chain-of-thought logs');
+
+  // Build a prompt instructing the LLM to generate CoT logs
+  const prompt = `Generate detailed chain-of-thought logs explaining how synthetic data would be generated based on the following specification: ${JSON.stringify(datasetSpec)}.
+
+Please explain:
+1. The overall approach to generating this synthetic data
+2. The techniques used to preserve statistical properties while ensuring privacy
+3. How personally identifiable information (PII) would be removed
+4. How data distributions would be maintained
+5. Any potential limitations or considerations for this synthetic dataset
+
+IMPORTANT: Do NOT include any specific values from the synthetic data. Your explanation should be general and educational.
+
+Here's the structure of the generated synthetic data (showing only structure, not values):
+${JSON.stringify(Object.keys(syntheticData.data && syntheticData.data[0] ? syntheticData.data[0] : syntheticData))}
+
+Provide a detailed, step-by-step explanation that would help a potential buyer understand the synthetic data generation process.`;
+
+  const messages = [
+    {
+      role: 'system',
+      content: 'You are an AI specialized in explaining privacy-preserving synthetic data generation processes. Provide clear, detailed explanations of how synthetic data is generated while ensuring no private information is revealed.',
+    },
+    {
+      role: 'user',
+      content: prompt,
+    },
+  ];
+
+  // Use the LLM service to generate the CoT logs
+  const llmResponse = await nillionSecretLLMService.runLLMChat(messages, {
+    model: 'meta-llama/Llama-3.1-8B-Instruct',
+    temperature: 0.7, // Slightly higher temperature for more detailed explanation
+  });
+
+  // Extract the CoT logs from the LLM response
+  const cotLogs = llmResponse?.choices?.[0]?.message?.content || 'Failed to generate chain-of-thought logs';
+  return cotLogs;
+}
+
+/**
  * Agent Index Bucket address from environment - will be used for all storage
  */
 let AGENT_INDEX_BUCKET = process.env.AGENT_INDEX_BUCKET;
-
 /**
  * Generate a synthetic dataset using the TEE-based LLM service, then store it in the Agent Index Bucket.
  * Also store optional chain-of-thought or reasoning logs to the same agent index bucket with matching timestamp.
@@ -241,19 +291,16 @@ The response must ONLY be the JSON object, with no code blocks or other text.`;
   const syntheticDataText = llmResponse?.choices?.[0]?.message?.content || '';
   console.log('[syntheticDataService] LLM response length:', syntheticDataText.length);
 
-  // Store chain-of-thought log with the same timestamp (encrypt it if userKey is provided)
-  const chainOfThought = `Raw LLM text:\n${syntheticDataText.slice(0, 2000)}...`;
-  let logContent = chainOfThought;
-  if (userKey) {
-    const encryptedLog = encryptData(chainOfThought, userKey);
-    logContent = JSON.stringify(encryptedLog);
-  }
-  const logResult = await storeChainOfThoughtLog(logContent, timestamp);
-
   // Attempt to parse the LLM's JSON into an object
   const syntheticData = parseSyntheticData(syntheticDataText);
 
   validateSyntheticDataPrivacy(syntheticData);
+
+  // Generate proper chain-of-thought logs with a separate LLM call
+  const chainOfThought = await generateChainOfThoughtLogs(datasetSpec, syntheticData);
+
+  // Store the CoT logs - don't encrypt them since they'll be public
+  const logResult = await storeChainOfThoughtLog(chainOfThought, timestamp);
 
   // Add metadata to the synthetic data object including relationship to logs
   let syntheticDataWithMetadata = {
@@ -346,7 +393,6 @@ The response must ONLY be the JSON object, with no code blocks or other text.`;
     throw error;
   }
 }
-
 /**
  * Get all synthetic data objects from the agent index bucket
  * @returns {Promise<Array>} Array of synthetic data objects

@@ -8,6 +8,8 @@ class Web3Service {
     this.contractAddress = null;
     this.contractABI = null;
     this.networkId = null;
+    // Set your backend base URL here:
+    this.baseUrl = 'https://senfin-a.vercel.app';
   }
 
   async initialize() {
@@ -15,10 +17,10 @@ class Web3Service {
       if (window.ethereum) {
         // Create a new provider using the injected provider
         this.provider = new ethers.providers.Web3Provider(window.ethereum);
-        // Get the network
+        // Get the network info
         const network = await this.provider.getNetwork();
         this.networkId = network.chainId;
-        // Get contract info from backend
+        // Fetch contract info from the backend
         await this.getContractInfo();
         return true;
       } else {
@@ -33,15 +35,22 @@ class Web3Service {
 
   async getContractInfo() {
     try {
-      const response = await fetch('/access/contract-info');
+      // Use the absolute URL to fetch contract info
+      const response = await fetch(`${this.baseUrl}/access/contract-info`);
       const data = await response.json();
       if (data.success) {
         this.contractAddress = data.contractAddress;
         this.contractABI = data.contractABI;
-        // Instantiate contract with provider (read-only)
+        // Instantiate the contract (read-only) if possible
         if (this.contractAddress && this.contractABI && this.provider) {
-          this.contract = new ethers.Contract(this.contractAddress, this.contractABI, this.provider);
+          this.contract = new ethers.Contract(
+            this.contractAddress,
+            this.contractABI,
+            this.provider
+          );
         }
+      } else {
+        console.error('Contract info fetch was unsuccessful:', data);
       }
     } catch (error) {
       console.error('Error getting contract info:', error);
@@ -58,11 +67,15 @@ class Web3Service {
       }
       // Request account access
       const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
-      // Get the signer
+      // Get the signer from the provider
       this.signer = this.provider.getSigner();
       // Reinstantiate the contract with the signer for sending transactions
       if (this.contractAddress && this.contractABI) {
-        this.contract = new ethers.Contract(this.contractAddress, this.contractABI, this.signer);
+        this.contract = new ethers.Contract(
+          this.contractAddress,
+          this.contractABI,
+          this.signer
+        );
       }
       return accounts[0];
     } catch (error) {
@@ -76,9 +89,13 @@ class Web3Service {
       if (!this.signer) {
         throw new Error('Wallet not connected or signer not available');
       }
-      // Ensure contract is connected to the signer
+      // Ensure the contract is connected to the signer
       if (!this.contract.signer) {
-        this.contract = new ethers.Contract(this.contractAddress, this.contractABI, this.signer);
+        this.contract = new ethers.Contract(
+          this.contractAddress,
+          this.contractABI,
+          this.signer
+        );
       }
       // Convert price from ether to wei
       const priceWei = ethers.utils.parseEther(price);
@@ -88,13 +105,13 @@ class Web3Service {
       const receipt = await tx.wait();
       return {
         success: true,
-        transactionHash: receipt.transactionHash
+        transactionHash: receipt.transactionHash,
       };
     } catch (error) {
       console.error('Error purchasing access:', error);
       return {
         success: false,
-        error: error.message
+        error: error.message,
       };
     }
   }
@@ -105,20 +122,24 @@ class Web3Service {
         throw new Error('Wallet not connected or signer not available');
       }
       if (!this.contract.signer) {
-        this.contract = new ethers.Contract(this.contractAddress, this.contractABI, this.signer);
+        this.contract = new ethers.Contract(
+          this.contractAddress,
+          this.contractABI,
+          this.signer
+        );
       }
       const priceWei = ethers.utils.parseEther(price);
       const tx = await this.contract.registerDataset(datasetId, timestamp, priceWei);
       const receipt = await tx.wait();
       return {
         success: true,
-        transactionHash: receipt.transactionHash
+        transactionHash: receipt.transactionHash,
       };
     } catch (error) {
       console.error('Error registering dataset:', error);
       return {
         success: false,
-        error: error.message
+        error: error.message,
       };
     }
   }
@@ -162,7 +183,7 @@ class Web3Service {
     }
   }
 
-  // Helper function to generate dataset ID from timestamp
+  // Helper function to generate a dataset ID from a timestamp
   generateDatasetId(timestamp) {
     return ethers.BigNumber.from(timestamp).toString();
   }
