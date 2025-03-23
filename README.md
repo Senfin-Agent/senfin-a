@@ -18,4 +18,3 @@ Senfin-A is built using:
 - **Other Utilities** – Including environment variable management with .env files and file handling libraries.
 
 
-This README describes how Senfin-A works and outlines the technologies used, setup instructions, usage, and the overall architecture. It provides all necessary details in a clear and concise manner, ensuring that anyone reviewing the project can understand its purpose and how it operates.
